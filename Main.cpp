@@ -1,10 +1,14 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 #include <juce_audio_utils/juce_audio_utils.h>
 #include <algorithm>
+#include <array>
+#include <atomic>
+#include <cmath>
+#include <cstdint>
 #include <vector>
 #include <memory>
 
-// Streaming playback foundation. Clip editing and plugin hosting are pending.
+// Streaming playback plus a small, independently implemented pattern sequencer.
 class Studio final : public juce::AudioAppComponent, private juce::Timer
 {
 public:
@@ -21,22 +25,41 @@ public:
         tempo.setRange(40, 240, 1);
         tempo.setValue(120);
         tempo.setTextBoxStyle(juce::Slider::TextBoxRight, false, 56, 22);
-        position.setRange(0.0, 10.0, 0.01);
+        tempo.onValueChange = [this] { beatsPerMinute.store(tempo.getValue()); updateTimelineRange(); repaint(); };
+        position.setRange(0.0, 16.0, 0.01);
         position.setTextBoxStyle(juce::Slider::TextBoxRight, false, 65, 22);
         position.onDragStart = [this] { scrubbing = true; };
         position.onDragEnd = [this] { seekTo(position.getValue()); scrubbing = false; };
         position.onValueChange = [this] { if (scrubbing) seekTo(position.getValue()); };
-        tempoLabel.setText("BPM (grade)", juce::dontSendNotification);
+        tempoLabel.setText("BPM", juce::dontSendNotification);
         positionLabel.setText("Posicao", juce::dontSendNotification);
-        status.setText("Importe MP3/WAV. Cada arquivo ocupa uma pista, a partir do inicio.", juce::dontSendNotification);
+        status.setText("Marque passos no Channel Rack e compassos na Playlist; importe MP3/WAV para pistas de audio.", juce::dontSendNotification);
+        for (int i = 0; i < 16; ++i)
+        {
+            steps[i] = std::make_unique<juce::TextButton>(juce::String(i + 1));
+            steps[i]->setClickingTogglesState(true);
+            steps[i]->onClick = [this] { updatePatternMasks(); };
+            addAndMakeVisible(*steps[i]);
+        }
+        for (int i = 0; i < 8; ++i)
+        {
+            clips[i] = std::make_unique<juce::TextButton>("+");
+            clips[i]->setClickingTogglesState(true);
+            clips[i]->onClick = [this] { updatePatternMasks(); };
+            addAndMakeVisible(*clips[i]);
+        }
         importButton.onClick = [this] { chooseFiles(); };
         playButton.onClick = [this] {
-            const bool playing = !tracks.empty() && tracks.front()->transport.isPlaying();
+            const bool playing = sequencerPlaying.load();
+            sequencerPlaying.store(!playing);
             for (auto& t : tracks) playing ? t->transport.stop() : t->transport.start();
             playButton.setButtonText(playing ? "Play" : "Pause");
         };
         stopButton.onClick = [this] {
+            sequencerPlaying.store(false);
             for (auto& t : tracks) { t->transport.stop(); t->transport.setPosition(0); }
+            songSeconds.store(0.0);
+            seekRevision.fetch_add(1);
             playButton.setButtonText("Play");
             position.setValue(0.0, juce::dontSendNotification);
         };
@@ -52,11 +75,59 @@ public:
         tracks.clear();
         diskThread.stopThread(3000);
     }
-    void prepareToPlay(int blockSize, double sampleRate) override { mixer.prepareToPlay(blockSize, sampleRate); }
+    void prepareToPlay(int blockSize, double sampleRate) override
+    {
+        outputSampleRate = sampleRate;
+        mixer.prepareToPlay(blockSize, sampleRate);
+    }
     void releaseResources() override { mixer.releaseResources(); }
     void getNextAudioBlock(const juce::AudioSourceChannelInfo& info) override
     {
         mixer.getNextAudioBlock(info);
+        if (!sequencerPlaying.load() || outputSampleRate <= 0.0) return;
+        const auto revision = seekRevision.load();
+        if (revision != seenRevision)
+        {
+            seenRevision = revision;
+            previousStep = -1;
+            kickAge = -1.0;
+        }
+        auto seconds = songSeconds.load();
+        const auto bpm = beatsPerMinute.load();
+        const auto loopSeconds = 8.0 * 4.0 * 60.0 / bpm;
+        const auto activeSteps = stepMask.load();
+        const auto activeClips = clipMask.load();
+        for (int i = 0; i < info.numSamples; ++i)
+        {
+            if (!hasAudioTracks.load() && seconds >= loopSeconds)
+            {
+                seconds = 0.0;
+                previousStep = -1;
+            }
+            const int globalStep = static_cast<int>(seconds * bpm / 60.0 * 4.0);
+            if (globalStep != previousStep)
+            {
+                previousStep = globalStep;
+                const int bar = (globalStep / 16) % 8;
+                const int step = globalStep % 16;
+                if ((activeClips & (1u << bar)) && (activeSteps & (1u << step)))
+                {
+                    kickAge = 0.0;
+                    kickPhase = 0.0;
+                }
+            }
+            if (kickAge >= 0.0 && kickAge < 0.32)
+            {
+                const auto frequency = 48.0 + 115.0 * std::exp(-kickAge * 24.0);
+                kickPhase += juce::MathConstants<double>::twoPi * frequency / outputSampleRate;
+                const auto sample = static_cast<float>(0.38 * std::sin(kickPhase) * std::exp(-kickAge * 15.0));
+                for (int channel = 0; channel < info.buffer->getNumChannels(); ++channel)
+                    info.buffer->addSample(channel, info.startSample + i, sample);
+                kickAge += 1.0 / outputSampleRate;
+            }
+            seconds += 1.0 / outputSampleRate;
+        }
+        if (seekRevision.load() == revision) songSeconds.store(seconds);
     }
     void resized() override
     {
@@ -67,8 +138,15 @@ public:
         tempo.setBounds(490, 64, 155, 32);
         positionLabel.setBounds(660, 64, 68, 32);
         position.setBounds(725, 64, getWidth() - 745, 32);
+        const int playlistWidth = getWidth() - 260;
+        for (int i = 0; i < 8; ++i)
+            clips[i]->setBounds(240 + i * playlistWidth / 8, 149, playlistWidth / 8 - 4, 43);
+        const int rackY = getHeight() - 145;
+        for (int i = 0; i < 16; ++i)
+            steps[i]->setBounds(240 + i * (getWidth() - 260) / 16, rackY + 30,
+                                (getWidth() - 260) / 16 - 3, 32);
         status.setBounds(20, getHeight() - 44, getWidth() - 40, 30);
-        int rowY = 120;
+        int rowY = 205;
         for (auto& t : tracks)
         {
             t->gain.setBounds(240, rowY + 48, 165, 24);
@@ -84,18 +162,23 @@ public:
         g.setFont(28.0f);
         g.drawText("PULSE / desktop", 20, 15, 500, 36, juce::Justification::centredLeft);
         g.setFont(14.0f);
+        g.setColour(juce::Colours::white);
+        g.drawText("Playlist - Pattern 1", 20, 120, 200, 24, juce::Justification::centredLeft);
+        g.drawText("Channel Rack - Kick", 20, getHeight() - 145, 210, 55, juce::Justification::centredLeft);
         const float width = static_cast<float>(getWidth() - 260);
-        double duration = 10;
-        for (auto& t : tracks) duration = juce::jmax(duration, t->transport.getLengthInSeconds());
+        const double duration = timelineDuration();
         const double secondsPerBeat = 60.0 / tempo.getValue();
         g.setColour(juce::Colour(0xff4a5569));
         for (double beat = 0; beat < duration / secondsPerBeat && beat < 1000; beat += 4)
         {
             const auto x = 240.0f + static_cast<float>(beat * secondsPerBeat / duration) * width;
-            g.drawVerticalLine(static_cast<int>(x), 108.0f, static_cast<float>(juce::jmin(getHeight() - 50, 120 + static_cast<int>(tracks.size()) * 56)));
+            g.drawVerticalLine(static_cast<int>(x), 108.0f, static_cast<float>(juce::jmin(getHeight() - 155, 205 + static_cast<int>(tracks.size()) * 56)));
             g.drawText(juce::String(static_cast<int>(beat / 4) + 1), static_cast<int>(x) + 2, 99, 32, 18, juce::Justification::centredLeft);
         }
-        int y = 120;
+        g.setColour(juce::Colours::white);
+        const auto playheadX = 240.0f + static_cast<float>(songSeconds.load() / duration) * width;
+        g.drawLine(playheadX, 145.0f, playheadX, 194.0f, 2.0f);
+        int y = 205;
         for (auto& t : tracks)
         {
             g.setColour(juce::Colours::white);
@@ -112,10 +195,38 @@ public:
         if (tracks.empty())
         {
             g.setColour(juce::Colours::lightgrey);
-            g.drawText("Biblioteca vazia - importe arquivos para ouvir as pistas juntas.", 20, 125, getWidth() - 40, 40, juce::Justification::centredLeft);
+            g.drawText("Sem audio importado. Ative passos e compassos para criar um ritmo.", 20, 210, getWidth() - 40, 40, juce::Justification::centredLeft);
         }
     }
 private:
+    double timelineDuration() const
+    {
+        double duration = 8.0 * 4.0 * 60.0 / beatsPerMinute.load();
+        for (const auto& t : tracks) duration = juce::jmax(duration, t->transport.getLengthInSeconds());
+        return duration;
+    }
+    void updateTimelineRange()
+    {
+        position.setRange(0.0, timelineDuration(), 0.01);
+    }
+    void updatePatternMasks()
+    {
+        uint16_t newSteps = 0;
+        uint8_t newClips = 0;
+        for (int i = 0; i < 16; ++i)
+        {
+            if (steps[i]->getToggleState()) newSteps |= static_cast<uint16_t>(1u << i);
+            steps[i]->setColour(juce::TextButton::buttonOnColourId, juce::Colour(0xffb9e67a));
+        }
+        for (int i = 0; i < 8; ++i)
+        {
+            if (clips[i]->getToggleState()) newClips |= static_cast<uint8_t>(1u << i);
+            clips[i]->setButtonText(clips[i]->getToggleState() ? "P1" : "+");
+            clips[i]->setColour(juce::TextButton::buttonOnColourId, juce::Colour(0xff79c8d4));
+        }
+        stepMask.store(newSteps);
+        clipMask.store(newClips);
+    }
     struct Track
     {
         juce::String name;
@@ -136,6 +247,8 @@ private:
     void seekTo(double seconds)
     {
         for (auto& t : tracks) t->transport.setPosition(juce::jlimit(0.0, t->transport.getLengthInSeconds(), seconds));
+        songSeconds.store(seconds);
+        seekRevision.fetch_add(1);
     }
     void chooseFiles()
     {
@@ -148,7 +261,9 @@ private:
                 if (files.isEmpty()) return;
                 // Reconfigure only while the device callback is disconnected.
                 safe->shutdownAudio();
+                safe->sequencerPlaying.store(false);
                 for (auto& t : safe->tracks) { t->transport.stop(); t->transport.setPosition(0); }
+                safe->songSeconds.store(0.0);
                 safe->playButton.setButtonText("Play");
                 int failed = 0;
                 for (const auto& file : files)
@@ -174,9 +289,8 @@ private:
                     safe->tracks.push_back(std::move(track));
                 }
                 safe->updateGains();
-                double duration = 10.0;
-                for (auto& t : safe->tracks) duration = juce::jmax(duration, t->transport.getLengthInSeconds());
-                safe->position.setRange(0.0, duration, 0.01);
+                safe->hasAudioTracks.store(!safe->tracks.empty());
+                safe->updateTimelineRange();
                 safe->setAudioChannels(0, 2);
                 safe->status.setText(juce::String(static_cast<int>(safe->tracks.size())) + " pistas. Ignorados/invalidos: " + juce::String(failed) + ". Limite inicial: 8 pistas.", juce::dontSendNotification);
                 safe->repaint();
@@ -185,8 +299,8 @@ private:
     }
     void timerCallback() override
     {
-        if (!scrubbing && !tracks.empty())
-            position.setValue(tracks.front()->transport.getCurrentPosition(), juce::dontSendNotification);
+        if (!scrubbing)
+            position.setValue(songSeconds.load(), juce::dontSendNotification);
         repaint();
     }
     juce::AudioFormatManager formats;
@@ -194,8 +308,18 @@ private:
     std::vector<std::unique_ptr<Track>> tracks;
     juce::MixerAudioSource mixer;
     juce::TextButton importButton { "Importar MP3 / WAV" }, playButton { "Play" }, stopButton { "Stop" };
+    std::array<std::unique_ptr<juce::TextButton>, 16> steps;
+    std::array<std::unique_ptr<juce::TextButton>, 8> clips;
     juce::Label status, tempoLabel, positionLabel;
     juce::Slider tempo, position;
+    std::atomic<double> beatsPerMinute { 120.0 }, songSeconds { 0.0 };
+    std::atomic<uint64_t> seekRevision { 0 };
+    std::atomic<uint16_t> stepMask { 0 };
+    std::atomic<uint8_t> clipMask { 0 };
+    std::atomic<bool> sequencerPlaying { false }, hasAudioTracks { false };
+    double outputSampleRate = 0.0, kickAge = -1.0, kickPhase = 0.0;
+    int previousStep = -1;
+    uint64_t seenRevision = 0;
     bool scrubbing = false;
     std::unique_ptr<juce::FileChooser> chooser;
 };
