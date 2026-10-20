@@ -15,6 +15,7 @@ class PatternSlotButton final : public juce::TextButton
 {
 public:
     std::function<void()> onRightClick;
+    std::function<void(int, bool)> onDrop;
     void mouseDown(const juce::MouseEvent& event) override
     {
         if (event.mods.isRightButtonDown())
@@ -23,6 +24,17 @@ public:
             return;
         }
         juce::TextButton::mouseDown(event);
+    }
+    void mouseUp(const juce::MouseEvent& event) override
+    {
+        if (event.mods.isRightButtonDown()) return;
+        if (event.mouseWasDraggedSinceMouseDown())
+        {
+            if (onDrop)
+                onDrop(event.getEventRelativeTo(getParentComponent()).x, event.mods.isShiftDown());
+            return;
+        }
+        juce::TextButton::mouseUp(event);
     }
     void paintButton(juce::Graphics& g, bool highlighted, bool pressed) override
     {
@@ -54,12 +66,14 @@ public:
     {
         for (auto& pattern : patternMasks)
             for (auto& mask : pattern) mask.store(0);
+        for (auto& pattern : noteMasks)
+            for (auto& mask : pattern) mask.store(0);
         for (auto& clip : clipPatterns) clip.store(0);
         for (auto& gain : gains) gain.store(1.0f);
         for (auto& pan : pans) pan.store(0.0f);
         formats.registerBasicFormats();
         diskThread.startThread();
-        for (auto* b : { &importButton, &playButton, &stopButton, &rackButton,
+        for (auto* b : { &importButton, &playButton, &stopButton, &rackButton, &pianoButton,
                          &newPatternButton, &clonePatternButton, &addChannelButton }) addAndMakeVisible(b);
         addAndMakeVisible(patternSelector);
         patternSelector.addItem("Pattern 1", 1);
@@ -75,6 +89,12 @@ public:
         rackButton.setClickingTogglesState(true);
         rackButton.setToggleState(true, juce::dontSendNotification);
         rackButton.onClick = [this] { rackVisible = rackButton.getToggleState(); resized(); repaint(); };
+        pianoButton.onClick = [this] { pianoVisible = !pianoVisible; rackVisible = true; rackButton.setToggleState(true, juce::dontSendNotification); resized(); repaint(); };
+        addAndMakeVisible(playlistScroll);
+        playlistScroll.setRange(1, pulse::playlistBars - visiblePlaylistBars + 1, 1);
+        playlistScroll.setValue(1, juce::dontSendNotification);
+        playlistScroll.setTextBoxStyle(juce::Slider::TextBoxLeft, false, 46, 20);
+        playlistScroll.onValueChange = [this] { firstVisibleBar = static_cast<int>(playlistScroll.getValue()) - 1; updateClipButtons(); repaint(); };
         addAndMakeVisible(status);
         addAndMakeVisible(tempo);
         addAndMakeVisible(tempoLabel);
@@ -130,15 +150,28 @@ public:
                 addAndMakeVisible(*button);
             }
         }
-        for (int i = 0; i < 8; ++i)
+        for (int i = 0; i < visiblePlaylistBars; ++i)
         {
             clips[i] = std::make_unique<PatternSlotButton>();
             clips[i]->onClick = [this, i] {
-                const int current = clipPatterns[i].load();
-                clipPatterns[i].store(current == selectedPattern ? 0 : selectedPattern);
+                const int bar = firstVisibleBar + i;
+                const int current = clipPatterns[bar].load();
+                clipPatterns[bar].store(current == selectedPattern ? 0 : selectedPattern);
+                updateArrangementEnd();
                 updateClipButtons();
             };
-            clips[i]->onRightClick = [this, i] { clipPatterns[i].store(0); updateClipButtons(); };
+            clips[i]->onRightClick = [this, i] { clipPatterns[firstVisibleBar + i].store(0); updateArrangementEnd(); updateClipButtons(); };
+            clips[i]->onDrop = [this, i](int x, bool duplicate) {
+                const int source = firstVisibleBar + i;
+                const int pattern = clipPatterns[source].load();
+                const int slot = (x - playlistLeft()) / barPixelWidth();
+                if (pattern == 0 || slot < 0 || slot >= visiblePlaylistBars) return;
+                const int destination = firstVisibleBar + slot;
+                if (destination == source) return;
+                clipPatterns[destination].store(pattern);
+                if (!duplicate) clipPatterns[source].store(0);
+                updateArrangementEnd(); updateClipButtons();
+            };
             addAndMakeVisible(*clips[i]);
         }
         importButton.onClick = [this] { chooseFiles(); };
@@ -187,10 +220,11 @@ public:
             previousStep = -1;
             for (auto& voices : channelVoices)
                 for (auto& voice : voices) voice.age = -1.0;
+            for (auto& voice : pianoVoices) voice.age = -1.0;
         }
         auto seconds = songSeconds.load();
         const auto bpm = beatsPerMinute.load();
-        const auto loopSeconds = 8.0 * 4.0 * 60.0 / bpm;
+        const auto loopSeconds = arrangementEndBars.load() * 4.0 * 60.0 / bpm;
         std::array<std::shared_ptr<const SampleData>, maxChannels> loadedSamples;
         for (int channel = 0; channel < channelCount.load(); ++channel)
             loadedSamples[channel] = std::atomic_load(&samples[channel]);
@@ -207,7 +241,7 @@ public:
                 previousStep = globalStep;
                 const int bar = pulse::barAtStep(globalStep);
                 const int step = pulse::stepInBar(globalStep);
-                const int pattern = clipPatterns[bar].load();
+                const int pattern = globalStep < pulse::playlistBars * stepsPerBar ? clipPatterns[bar].load() : 0;
                 if (pattern > 0)
                 {
                     for (int channel = 0; channel < channelCount.load(); ++channel)
@@ -217,6 +251,14 @@ public:
                             auto& voice = voices[nextVoice[channel]++ % voices.size()];
                             voice = {};
                             voice.age = 0.0;
+                        }
+                    for (int note = 0; note < pianoNotes; ++note)
+                        if (pulse::stepEnabled(noteMasks[pattern - 1][note].load(), step))
+                        {
+                            auto& voice = pianoVoices[nextPianoVoice++ % pianoVoices.size()];
+                            voice.age = 0.0;
+                            voice.phase = 0.0;
+                            voice.midiNote = 60 + note;
                         }
                 }
             }
@@ -268,6 +310,22 @@ public:
                     age += 1.0 / outputSampleRate;
                 }
             }
+            for (auto& voice : pianoVoices)
+            {
+                if (voice.age < 0.0) continue;
+                const double duration = 15.0 / bpm;
+                const double release = 0.06;
+                if (voice.age >= duration + release) { voice.age = -1.0; continue; }
+                const double frequency = pulse::noteFrequency(voice.midiNote);
+                voice.phase += juce::MathConstants<double>::twoPi * frequency / outputSampleRate;
+                const float envelope = static_cast<float>(juce::jmin(1.0, voice.age * 100.0)
+                    * juce::jlimit(0.0, 1.0, (duration + release - voice.age) / release));
+                const float sound = 0.14f * envelope * static_cast<float>(std::sin(voice.phase)
+                    + 0.2 * std::sin(2.0 * voice.phase));
+                drumLeft += sound;
+                drumRight += sound;
+                voice.age += 1.0 / outputSampleRate;
+            }
             info.buffer->addSample(0, info.startSample + i, drumLeft);
             if (info.buffer->getNumChannels() > 1)
                 info.buffer->addSample(1, info.startSample + i, drumRight);
@@ -280,28 +338,30 @@ public:
         constexpr int browserWidth = 190, trackHeaderWidth = 122;
         const int left = browserWidth + trackHeaderWidth;
         const int playlistWidth = juce::jmax(80, getWidth() - left - 14);
-        const int barWidth = juce::jmax(8, playlistWidth / visibleBars());
+        const int barWidth = juce::jmax(8, playlistWidth / visiblePlaylistBars);
         playButton.setBounds(12, 10, 62, 28);
         stopButton.setBounds(78, 10, 62, 28);
         tempoLabel.setBounds(154, 10, 34, 28);
         tempo.setBounds(188, 10, 106, 28);
         positionLabel.setBounds(312, 10, 58, 28);
-        position.setBounds(370, 10, juce::jmax(80, getWidth() - 600), 28);
-        rackButton.setBounds(getWidth() - 196, 10, 88, 28);
+        position.setBounds(370, 10, juce::jmax(80, getWidth() - 710), 28);
+        rackButton.setBounds(getWidth() - 286, 10, 88, 28);
+        pianoButton.setBounds(getWidth() - 194, 10, 88, 28);
         importButton.setBounds(getWidth() - 104, 10, 94, 28);
+        playlistScroll.setBounds(left + 8, 91, juce::jmax(80, playlistWidth - 16), 23);
         patternSelector.setBounds(left + 84, 54, 112, 26);
         newPatternButton.setBounds(left + 200, 54, 62, 26);
         clonePatternButton.setBounds(left + 266, 54, 68, 26);
-        for (int i = 0; i < 8; ++i)
+        for (int i = 0; i < visiblePlaylistBars; ++i)
             clips[i]->setBounds(left + i * barWidth + 1, 151,
                                 juce::jmax(8, barWidth - 2), 32);
         const int rackY = getHeight() - 294;
-        addChannelButton.setVisible(rackVisible && channelCount.load() < maxChannels);
+        addChannelButton.setVisible(rackVisible && !pianoVisible && channelCount.load() < maxChannels);
         addChannelButton.setBounds(getWidth() - 123, rackY + 7, 98, 25);
         const int stepWidth = juce::jmax(8, (playlistWidth - 246) / stepsPerBar);
         for (int channel = 0; channel < maxChannels; ++channel)
         {
-            const bool show = rackVisible && channel < channelCount.load();
+            const bool show = rackVisible && !pianoVisible && channel < channelCount.load();
             const int y = rackY + 39 + channel * 32;
             channelButtons[channel]->setVisible(show);
             channelButtons[channel]->setBounds(left + 10, y, 82, 24);
@@ -336,7 +396,9 @@ public:
         const int left = browserWidth + trackHeaderWidth;
         const int right = getWidth() - 14;
         const int gridWidth = juce::jmax(80, right - left);
-        const double visibleSeconds = visibleBars() * 4.0 * 60.0 / beatsPerMinute.load();
+        const double secondsPerBar = 4.0 * 60.0 / beatsPerMinute.load();
+        const double visibleSeconds = visiblePlaylistBars * secondsPerBar;
+        const double viewStartSeconds = firstVisibleBar * secondsPerBar;
         const int gridBottom = getHeight() - 32;
         const auto ink = juce::Colour(0xffd9e2e7);
         const auto muted = juce::Colour(0xff8797a2);
@@ -380,7 +442,7 @@ public:
         g.drawText("Playlist", browserWidth + 9, 94, trackHeaderWidth - 16, 22, juce::Justification::centredLeft);
         g.setColour(juce::Colour(0xff263441));
         g.fillRect(left, 122, gridWidth, gridBottom - 122);
-        const int barCount = visibleBars();
+        const int barCount = visiblePlaylistBars;
         for (int bar = 0; bar < barCount; ++bar)
         {
             const int x = left + bar * gridWidth / barCount;
@@ -390,7 +452,7 @@ public:
             g.drawVerticalLine(x, 123.0f, static_cast<float>(gridBottom));
             g.setColour(ink);
             g.setFont(11.0f);
-            g.drawText(juce::String(bar + 1), x + 5, 125, 32, 18, juce::Justification::centredLeft);
+            g.drawText(juce::String(firstVisibleBar + bar + 1), x + 5, 125, 32, 18, juce::Justification::centredLeft);
             g.setColour(juce::Colour(0xff35495a));
             for (int beat = 1; beat < 4; ++beat)
                 g.drawVerticalLine(x + beat * gridWidth / (barCount * 4), 148.0f, static_cast<float>(gridBottom));
@@ -412,7 +474,7 @@ public:
         {
             const int y = 188 + static_cast<int>(i) * 40;
             if (y >= gridBottom) break;
-            const float clipWidth = static_cast<float>(juce::jlimit(0.0, visibleSeconds, tracks[i]->transport.getLengthInSeconds()) / visibleSeconds * gridWidth);
+            const float clipWidth = static_cast<float>(juce::jlimit(0.0, visibleSeconds, tracks[i]->transport.getLengthInSeconds() - viewStartSeconds) / visibleSeconds * gridWidth);
             g.setColour(juce::Colour(0xff4e9ba8));
             g.fillRoundedRectangle(static_cast<float>(left + 2), static_cast<float>(y + 2),
                                    juce::jmax(2.0f, clipWidth - 4.0f), 34.0f, 3.0f);
@@ -421,9 +483,12 @@ public:
                        juce::jmax(8, static_cast<int>(clipWidth) - 12), 18,
                        juce::Justification::centredLeft, true);
         }
-        const float playheadX = static_cast<float>(left) + static_cast<float>(songSeconds.load() / visibleSeconds) * gridWidth;
-        g.setColour(juce::Colour(0xfff6a96c));
-        g.drawLine(playheadX, 123.0f, playheadX, static_cast<float>(gridBottom), 1.5f);
+        const float playheadX = static_cast<float>(left) + static_cast<float>((songSeconds.load() - viewStartSeconds) / visibleSeconds) * gridWidth;
+        if (playheadX >= left && playheadX <= right)
+        {
+            g.setColour(juce::Colour(0xfff6a96c));
+            g.drawLine(playheadX, 123.0f, playheadX, static_cast<float>(gridBottom), 1.5f);
+        }
         if (rackVisible)
         {
             const int y = getHeight() - 294;
@@ -435,23 +500,96 @@ public:
                                    static_cast<float>(gridWidth), 254.0f, 4.0f, 1.0f);
             g.setColour(ink);
             g.setFont(12.0f);
-            g.drawText("CHANNEL RACK  /  Pattern " + juce::String(selectedPattern), left + 12, y + 8,
+            g.drawText(juce::String(pianoVisible ? "PIANO ROLL" : "CHANNEL RACK") + "  /  Pattern " + juce::String(selectedPattern), left + 12, y + 8,
                        gridWidth - 130, 22, juce::Justification::centredLeft);
-            for (int channel = 0; channel < channelCount.load(); ++channel)
+            if (pianoVisible)
+                paintPiano(g, left, y, gridWidth);
+            else for (int channel = 0; channel < channelCount.load(); ++channel)
             {
                 g.setColour(channel % 2 == 0 ? juce::Colour(0xff263745) : juce::Colour(0xff21313f));
                 g.fillRect(left + 8, y + 36 + channel * 32, gridWidth - 16, 29);
             }
             g.setColour(muted);
             g.setFont(10.0f);
-            g.drawText("Canal/Load: WAV ou MP3; controles: volume e pan. Clique no compasso para inserir; direito remove.",
+            g.drawText(pianoVisible ? "Clique ou arraste para desenhar notas; cada nota dura um passo (semicolcheia)."
+                                    : "Canal/Load: WAV ou MP3; arraste clips para mover, Shift+arraste para duplicar; direito remove.",
                        left + 12, y + 233, gridWidth - 24, 17, juce::Justification::centredLeft);
         }
         g.setColour(juce::Colour(0xff202a35));
         g.fillRect(0, getHeight() - 32, getWidth(), 32);
     }
+    void mouseDown(const juce::MouseEvent& event) override
+    {
+        editPiano(event, false);
+    }
+    void mouseDrag(const juce::MouseEvent& event) override
+    {
+        editPiano(event, true);
+    }
 private:
     static constexpr int maxChannels = 6, maxPatterns = 4, stepsPerBar = 16;
+    static constexpr int visiblePlaylistBars = 8, pianoNotes = 12;
+    int playlistLeft() const { return 312; }
+    int barPixelWidth() const { return juce::jmax(8, (getWidth() - playlistLeft() - 14) / visiblePlaylistBars); }
+    void updateArrangementEnd()
+    {
+        int last = visiblePlaylistBars;
+        for (int bar = 0; bar < pulse::playlistBars; ++bar)
+            if (clipPatterns[bar].load() != 0) last = bar + 1;
+        arrangementEndBars.store(last);
+        updateTimelineRange();
+    }
+    void paintPiano(juce::Graphics& g, int left, int top, int width)
+    {
+        const int noteLeft = left + 68;
+        const int noteWidth = width - 80;
+        for (int row = 0; row < pianoNotes; ++row)
+        {
+            const int pitch = pianoNotes - 1 - row;
+            const int y = top + 36 + row * 16;
+            const bool black = pitch == 1 || pitch == 3 || pitch == 6 || pitch == 8 || pitch == 10;
+            g.setColour(black ? juce::Colour(0xff18222c) : juce::Colour(0xffd3dce0));
+            g.fillRect(left + 9, y, 55, 15);
+            g.setColour(black ? juce::Colours::white : juce::Colours::black);
+            g.setFont(10.0f);
+            g.drawText(juce::String(juce::MidiMessage::getMidiNoteName(60 + pitch, true, true, 4)),
+                       left + 14, y, 48, 15, juce::Justification::centredLeft);
+            const auto mask = noteMasks[selectedPattern - 1][pitch].load();
+            for (int step = 0; step < stepsPerBar; ++step)
+            {
+                const int x0 = noteLeft + step * noteWidth / stepsPerBar;
+                const int x1 = noteLeft + (step + 1) * noteWidth / stepsPerBar;
+                g.setColour((step % 4 == 0) ? juce::Colour(0xff344453) : juce::Colour(0xff293846));
+                g.fillRect(x0, y, x1 - x0 - 1, 15);
+                if (pulse::stepEnabled(mask, step))
+                {
+                    g.setColour(juce::Colour(0xffb2df87));
+                    g.fillRoundedRectangle(static_cast<float>(x0 + 1), static_cast<float>(y + 1),
+                                           static_cast<float>(x1 - x0 - 3), 13.0f, 2.0f);
+                }
+            }
+        }
+    }
+    void editPiano(const juce::MouseEvent& event, bool dragging)
+    {
+        if (!rackVisible || !pianoVisible) return;
+        const int top = getHeight() - 294;
+        const int x = static_cast<int>(event.position.x);
+        const int y = static_cast<int>(event.position.y);
+        const int noteLeft = playlistLeft() + 68;
+        const int noteWidth = getWidth() - playlistLeft() - 14 - 80;
+        if (x < noteLeft || x >= noteLeft + noteWidth || y < top + 36 || y >= top + 228) return;
+        const int step = (x - noteLeft) * stepsPerBar / noteWidth;
+        const int pitch = pianoNotes - 1 - (y - top - 36) / 16;
+        if (step < 0 || step >= stepsPerBar || pitch < 0 || pitch >= pianoNotes) return;
+        const uint16_t bit = static_cast<uint16_t>(1u << step);
+        auto& mask = noteMasks[selectedPattern - 1][pitch];
+        const auto old = mask.load();
+        const auto next = event.mods.isRightButtonDown() ? static_cast<uint16_t>(old & ~bit)
+                          : dragging ? static_cast<uint16_t>(old | bit)
+                                     : static_cast<uint16_t>(old ^ bit);
+        if (next != old) { mask.store(next); repaint(); }
+    }
     struct SampleData
     {
         std::vector<float> left, right;
@@ -461,6 +599,11 @@ private:
     {
         double age = -1.0, phase = 0.0, samplePosition = 0.0;
         float previousNoise = 0.0f;
+    };
+    struct PianoVoice
+    {
+        double age = -1.0, phase = 0.0;
+        int midiNote = 60;
     };
     void addChannel()
     {
@@ -500,14 +643,9 @@ private:
         status.setText("Canal removido; os demais canais mantiveram seus passos e samples.", juce::dontSendNotification);
         resized(); repaint();
     }
-    int visibleBars() const
-    {
-        const double secondsPerBar = 4.0 * 60.0 / beatsPerMinute.load();
-        return juce::jlimit(8, 64, static_cast<int>(std::ceil(timelineDuration() / secondsPerBar)));
-    }
     double timelineDuration() const
     {
-        double duration = 8.0 * 4.0 * 60.0 / beatsPerMinute.load();
+        double duration = arrangementEndBars.load() * 4.0 * 60.0 / beatsPerMinute.load();
         for (const auto& t : tracks) duration = juce::jmax(duration, t->transport.getLengthInSeconds());
         return duration;
     }
@@ -533,9 +671,9 @@ private:
     }
     void updateClipButtons()
     {
-        for (int i = 0; i < 8; ++i)
+        for (int i = 0; i < visiblePlaylistBars; ++i)
         {
-            const int pattern = clipPatterns[i].load();
+            const int pattern = clipPatterns[firstVisibleBar + i].load();
             clips[i]->setToggleState(pattern != 0, juce::dontSendNotification);
             clips[i]->setButtonText(pattern == 0 ? "" : "Pattern " + juce::String(pattern));
         }
@@ -547,6 +685,8 @@ private:
         const int destination = patternCount++;
         for (int channel = 0; channel < maxChannels; ++channel)
             patternMasks[destination][channel].store(clone ? patternMasks[source][channel].load() : 0);
+        for (int note = 0; note < pianoNotes; ++note)
+            noteMasks[destination][note].store(clone ? noteMasks[source][note].load() : 0);
         patternSelector.addItem("Pattern " + juce::String(patternCount), patternCount);
         patternSelector.setSelectedId(patternCount);
         if (patternCount == maxPatterns)
@@ -676,6 +816,12 @@ private:
     }
     void timerCallback() override
     {
+        if (sequencerPlaying.load())
+        {
+            const int bar = static_cast<int>(songSeconds.load() * beatsPerMinute.load() / 240.0);
+            if (bar < firstVisibleBar || bar >= firstVisibleBar + visiblePlaylistBars)
+                playlistScroll.setValue(juce::jlimit(1, pulse::playlistBars - visiblePlaylistBars + 1, bar + 1));
+        }
         if (!scrubbing)
             position.setValue(songSeconds.load(), juce::dontSendNotification);
         repaint();
@@ -684,7 +830,7 @@ private:
     juce::TimeSliceThread diskThread { "Pulse disk reader" };
     std::vector<std::unique_ptr<Track>> tracks;
     juce::MixerAudioSource mixer;
-    juce::TextButton importButton { "Importar" }, playButton { "Play" }, stopButton { "Stop" }, rackButton { "Rack" };
+    juce::TextButton importButton { "Importar" }, playButton { "Play" }, stopButton { "Stop" }, rackButton { "Rack" }, pianoButton { "Piano" };
     juce::TextButton newPatternButton { "Novo" }, clonePatternButton { "Clonar" }, addChannelButton { "+ Canal" };
     juce::ComboBox patternSelector;
     std::array<std::array<std::unique_ptr<juce::TextButton>, stepsPerBar>, maxChannels> channelSteps;
@@ -692,26 +838,30 @@ private:
     std::array<std::unique_ptr<juce::TextButton>, maxChannels> removeButtons;
     std::array<std::unique_ptr<juce::Slider>, maxChannels> channelGains, channelPans;
     std::array<juce::String, maxChannels> channelNames;
-    std::array<std::unique_ptr<PatternSlotButton>, 8> clips;
+    std::array<std::unique_ptr<PatternSlotButton>, visiblePlaylistBars> clips;
     juce::Label status, tempoLabel, positionLabel;
-    juce::Slider tempo, position;
+    juce::Slider tempo, position, playlistScroll;
     std::atomic<double> beatsPerMinute { 120.0 }, songSeconds { 0.0 };
     std::atomic<uint64_t> seekRevision { 0 };
     std::array<std::array<std::atomic<uint16_t>, maxChannels>, maxPatterns> patternMasks {};
-    std::array<std::atomic<uint8_t>, 8> clipPatterns {};
+    std::array<std::array<std::atomic<uint16_t>, pianoNotes>, maxPatterns> noteMasks {};
+    std::array<std::atomic<uint8_t>, pulse::playlistBars> clipPatterns {};
     std::array<std::atomic<float>, maxChannels> gains {};
     std::array<std::atomic<float>, maxChannels> pans {};
     std::array<std::shared_ptr<const SampleData>, maxChannels> samples;
     std::atomic<int> channelCount { 4 };
     std::atomic<bool> sequencerPlaying { false }, hasAudioTracks { false };
     std::array<std::array<Voice, 4>, maxChannels> channelVoices {};
+    std::array<PianoVoice, 16> pianoVoices {};
     std::array<size_t, maxChannels> nextVoice {};
+    size_t nextPianoVoice = 0;
     std::array<uint32_t, maxChannels> noiseStates { 0x12345678u, 0x8abcdef0u, 0x76543210u, 0xfedcba98u, 0x13579bdfu, 0x2468ace0u };
     double outputSampleRate = 0.0;
     int previousStep = -1;
     uint64_t seenRevision = 0;
-    int selectedPattern = 1, patternCount = 1;
-    bool scrubbing = false, rackVisible = true;
+    int selectedPattern = 1, patternCount = 1, firstVisibleBar = 0;
+    std::atomic<int> arrangementEndBars { visiblePlaylistBars };
+    bool scrubbing = false, rackVisible = true, pianoVisible = false;
     std::unique_ptr<juce::FileChooser> chooser;
     std::unique_ptr<juce::FileChooser> sampleChooser;
 };
