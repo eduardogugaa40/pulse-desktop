@@ -29,8 +29,11 @@ A busca envia a posição escolhida a cada transporte e ao sequenciador.
 Após observar Playlist e Channel Rack do FL Studio 2025 em um experimento
 temporário, `Main.cpp` ganhou um pattern audível próprio com 16 passos e oito
 posições na Playlist. É uma extensão do callback existente, não um motor paralelo.
-A validação necessária é a compilação Windows/Linux/macOS e teste em execução.
-Não há suíte automatizada de áudio neste marco.
+A compilação passou em Windows/Linux/macOS na execução 39361409444. No Windows,
+o usuário confirmou áudio audível após marcar os passos 1, 5, 9 e 13, ativar
+Pattern 1 nos dois primeiros compassos e iniciar o transporte. O playhead
+avançou e Stop voltou à posição zero. Falta testar áudio importado nesta versão;
+não há suíte automatizada de áudio neste marco.
 
 ## Próxima prioridade
 

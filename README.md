@@ -4,9 +4,11 @@ Base experimental de uma DAW open source para Windows, Linux e macOS.
 Implementação independente: não contém código, plugins ou recursos do FL Studio.
 
 **Estado: aplicativo inicial, ainda sem salvamento de projetos.**
-A versão anterior compilou em Windows, Linux e macOS no GitHub Actions
-([execução 39358527688](https://github.com/eduardogugaa40/pulse-desktop/actions/runs/39358527688)).
-O sequenciador novo ainda precisa de validação de build e áudio real. Não há
+A versão com sequenciador compilou em Windows, Linux e macOS no GitHub Actions
+([execução 39361409444](https://github.com/eduardogugaa40/pulse-desktop/actions/runs/39361409444)).
+No Windows, a janela abriu, passos e clipes responderam e o usuário confirmou
+que ouviu os pulsos do bumbo. Importação e reprodução de MP3/WAV nesta versão
+ainda precisam de teste manual. Não há
 instalador ou release. O protótipo web não faz parte deste projeto.
 
 ## Implementado no código
@@ -40,8 +42,8 @@ cmake --build build --config Release --parallel 2
 
 No Ubuntu, instale também as dependências listadas no workflow de CI.
 O aplicativo é gerado em `build/Pulse_artefacts/Release/`.
-O workflow de GitHub Actions compila nos três sistemas. Confira a execução
-mais recente para o estado deste código. Builds não substituem testes de áudio real.
+O workflow de GitHub Actions compilou esta versão nos três sistemas.
+O teste de áudio real até agora cobriu somente o bumbo interno no Windows.
 
 ## Licença e distribuição
 AGPL-3.0-only para o código original; JUCE sob sua opção AGPLv3.
