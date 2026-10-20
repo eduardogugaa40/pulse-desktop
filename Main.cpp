@@ -156,9 +156,13 @@ public:
             clips[i]->onClick = [this, i] {
                 const int bar = firstVisibleBar + i;
                 const int current = clipPatterns[bar].load();
-                clipPatterns[bar].store(current == selectedPattern ? 0 : selectedPattern);
-                updateArrangementEnd();
-                updateClipButtons();
+                if (current != 0)
+                    patternSelector.setSelectedId(current);
+                else
+                {
+                    clipPatterns[bar].store(static_cast<uint8_t>(selectedPattern));
+                    updateArrangementEnd(); updateClipButtons();
+                }
             };
             clips[i]->onRightClick = [this, i] { clipPatterns[firstVisibleBar + i].store(0); updateArrangementEnd(); updateClipButtons(); };
             clips[i]->onDrop = [this, i](int x, bool duplicate) {
