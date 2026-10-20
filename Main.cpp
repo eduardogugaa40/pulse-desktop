@@ -32,6 +32,8 @@ public:
         {
             if (onDrop)
                 onDrop(event.getEventRelativeTo(getParentComponent()).x, event.mods.isShiftDown());
+            // Let JUCE clear the button's pressed state after the drag.
+            juce::TextButton::mouseUp(event);
             return;
         }
         juce::TextButton::mouseUp(event);
