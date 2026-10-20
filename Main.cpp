@@ -16,7 +16,10 @@ public:
     {
         formats.registerBasicFormats();
         diskThread.startThread();
-        for (auto* b : { &importButton, &playButton, &stopButton }) addAndMakeVisible(b);
+        for (auto* b : { &importButton, &playButton, &stopButton, &rackButton }) addAndMakeVisible(b);
+        rackButton.setClickingTogglesState(true);
+        rackButton.setToggleState(true, juce::dontSendNotification);
+        rackButton.onClick = [this] { rackVisible = rackButton.getToggleState(); resized(); repaint(); };
         addAndMakeVisible(status);
         addAndMakeVisible(tempo);
         addAndMakeVisible(tempoLabel);
@@ -36,7 +39,7 @@ public:
         status.setText("Marque passos no Channel Rack e compassos na Playlist; importe MP3/WAV para pistas de audio.", juce::dontSendNotification);
         for (int i = 0; i < 16; ++i)
         {
-            steps[i] = std::make_unique<juce::TextButton>(juce::String(i + 1));
+            steps[i] = std::make_unique<juce::TextButton>(juce::String());
             steps[i]->setClickingTogglesState(true);
             steps[i]->onClick = [this] { updatePatternMasks(); };
             addAndMakeVisible(*steps[i]);
@@ -63,7 +66,8 @@ public:
             playButton.setButtonText("Play");
             position.setValue(0.0, juce::dontSendNotification);
         };
-        setSize(1000, 640);
+        updatePatternMasks();
+        setSize(1100, 700);
         setAudioChannels(0, 2);
         startTimerHz(15);
     }
@@ -131,72 +135,153 @@ public:
     }
     void resized() override
     {
-        importButton.setBounds(20, 64, 160, 32);
-        playButton.setBounds(190, 64, 90, 32);
-        stopButton.setBounds(290, 64, 90, 32);
-        tempoLabel.setBounds(400, 64, 95, 32);
-        tempo.setBounds(490, 64, 155, 32);
-        positionLabel.setBounds(660, 64, 68, 32);
-        position.setBounds(725, 64, getWidth() - 745, 32);
-        const int playlistWidth = getWidth() - 260;
+        constexpr int browserWidth = 190, trackHeaderWidth = 122;
+        const int left = browserWidth + trackHeaderWidth;
+        const int playlistWidth = juce::jmax(80, getWidth() - left - 14);
+        playButton.setBounds(12, 10, 62, 28);
+        stopButton.setBounds(78, 10, 62, 28);
+        tempoLabel.setBounds(154, 10, 34, 28);
+        tempo.setBounds(188, 10, 106, 28);
+        positionLabel.setBounds(312, 10, 58, 28);
+        position.setBounds(370, 10, juce::jmax(80, getWidth() - 600), 28);
+        rackButton.setBounds(getWidth() - 196, 10, 88, 28);
+        importButton.setBounds(getWidth() - 104, 10, 94, 28);
         for (int i = 0; i < 8; ++i)
-            clips[i]->setBounds(240 + i * playlistWidth / 8, 149, playlistWidth / 8 - 4, 43);
-        const int rackY = getHeight() - 145;
+            clips[i]->setBounds(left + i * playlistWidth / 8 + 2, 151,
+                                juce::jmax(8, playlistWidth / 8 - 4), 32);
+        const int rackY = getHeight() - 166;
         for (int i = 0; i < 16; ++i)
-            steps[i]->setBounds(240 + i * (getWidth() - 260) / 16, rackY + 30,
-                                (getWidth() - 260) / 16 - 3, 32);
-        status.setBounds(20, getHeight() - 44, getWidth() - 40, 30);
-        int rowY = 205;
+        {
+            steps[i]->setVisible(rackVisible);
+            steps[i]->setBounds(left + 114 + i * (playlistWidth - 130) / 16 + 1, rackY + 56,
+                                juce::jmax(8, (playlistWidth - 130) / 16 - 3), 20);
+        }
+        status.setBounds(12, getHeight() - 27, getWidth() - 24, 22);
+        int rowY = 188;
         for (auto& t : tracks)
         {
-            t->gain.setBounds(240, rowY + 48, 165, 24);
-            t->mute.setBounds(415, rowY + 48, 65, 24);
-            t->solo.setBounds(485, rowY + 48, 65, 24);
-            rowY += 56;
+            t->gain.setBounds(browserWidth + 4, rowY + 20, 76, 19);
+            t->mute.setBounds(browserWidth + 81, rowY + 20, 20, 19);
+            t->solo.setBounds(browserWidth + 103, rowY + 20, 20, 19);
+            rowY += 40;
         }
     }
     void paint(juce::Graphics& g) override
     {
-        g.fillAll(juce::Colour(0xff141820));
-        g.setColour(juce::Colour(0xffb9e67a));
-        g.setFont(28.0f);
-        g.drawText("PULSE / desktop", 20, 15, 500, 36, juce::Justification::centredLeft);
-        g.setFont(14.0f);
-        g.setColour(juce::Colours::white);
-        g.drawText("Playlist - Pattern 1", 20, 120, 200, 24, juce::Justification::centredLeft);
-        g.drawText("Channel Rack - Kick", 20, getHeight() - 145, 210, 55, juce::Justification::centredLeft);
-        const float width = static_cast<float>(getWidth() - 260);
-        const double duration = timelineDuration();
-        const double secondsPerBeat = 60.0 / tempo.getValue();
-        g.setColour(juce::Colour(0xff4a5569));
-        for (double beat = 0; beat < duration / secondsPerBeat && beat < 1000; beat += 4)
-        {
-            const auto x = 240.0f + static_cast<float>(beat * secondsPerBeat / duration) * width;
-            g.drawVerticalLine(static_cast<int>(x), 108.0f, static_cast<float>(juce::jmin(getHeight() - 155, 205 + static_cast<int>(tracks.size()) * 56)));
-            g.drawText(juce::String(static_cast<int>(beat / 4) + 1), static_cast<int>(x) + 2, 99, 32, 18, juce::Justification::centredLeft);
-        }
-        g.setColour(juce::Colours::white);
-        const auto playheadX = 240.0f + static_cast<float>(songSeconds.load() / duration) * width;
-        g.drawLine(playheadX, 145.0f, playheadX, 194.0f, 2.0f);
-        int y = 205;
-        for (auto& t : tracks)
-        {
-            g.setColour(juce::Colours::white);
-            g.drawText(t->name, 20, y, 210, 46, juce::Justification::centredLeft, true);
-            g.setColour(juce::Colour(0xff234552));
-            g.fillRect(240.0f, static_cast<float>(y), width, 46.0f);
-            g.setColour(juce::Colour(0xff79c8d4));
-            g.fillRect(240.0f, static_cast<float>(y), static_cast<float>(t->transport.getLengthInSeconds() / duration) * width, 46.0f);
-            g.setColour(juce::Colours::white);
-            const auto x = 240.0f + static_cast<float>(t->transport.getCurrentPosition() / duration) * width;
-            g.drawLine(x, static_cast<float>(y), x, static_cast<float>(y + 46), 2.0f);
-            y += 56;
-        }
+        constexpr int browserWidth = 190, trackHeaderWidth = 122;
+        const int left = browserWidth + trackHeaderWidth;
+        const int right = getWidth() - 14;
+        const int gridWidth = juce::jmax(80, right - left);
+        const int gridBottom = getHeight() - 32;
+        const auto ink = juce::Colour(0xffd9e2e7);
+        const auto muted = juce::Colour(0xff8797a2);
+        g.fillAll(juce::Colour(0xff151b23));
+        g.setColour(juce::Colour(0xff202a35));
+        g.fillRect(0, 0, getWidth(), 46);
+        g.setColour(juce::Colour(0xff354453));
+        g.drawHorizontalLine(45, 0.0f, static_cast<float>(getWidth()));
+        g.setColour(juce::Colour(0xffb2df87));
+        g.setFont(12.0f);
+        g.drawText("PULSE", 12, 55, 80, 22, juce::Justification::centredLeft);
+        g.setColour(muted);
+        g.setFont(11.0f);
+        g.drawText("PLAYLIST", browserWidth + 9, 55, 100, 22, juce::Justification::centredLeft);
+        g.drawText("PATTERN 1", left + 8, 55, 100, 22, juce::Justification::centredLeft);
+        g.setColour(juce::Colour(0xff1d2630));
+        g.fillRect(0, 86, browserWidth, gridBottom - 86);
+        g.setColour(juce::Colour(0xff2c3a47));
+        g.drawVerticalLine(browserWidth, 86.0f, static_cast<float>(gridBottom));
+        g.setColour(ink);
+        g.setFont(12.0f);
+        g.drawText("BROWSER", 12, 94, browserWidth - 24, 22, juce::Justification::centredLeft);
+        g.setColour(muted);
+        g.setFont(11.0f);
+        g.drawText("Arquivos do projeto", 12, 124, browserWidth - 24, 20, juce::Justification::centredLeft);
         if (tracks.empty())
+            g.drawText("Importe MP3 ou WAV acima", 12, 150, browserWidth - 24, 24, juce::Justification::centredLeft);
+        for (size_t i = 0; i < tracks.size(); ++i)
         {
-            g.setColour(juce::Colours::lightgrey);
-            g.drawText("Sem audio importado. Ative passos e compassos para criar um ritmo.", 20, 210, getWidth() - 40, 40, juce::Justification::centredLeft);
+            g.setColour(i % 2 == 0 ? juce::Colour(0xff283846) : juce::Colour(0xff23313e));
+            g.fillRoundedRectangle(8.0f, static_cast<float>(150 + static_cast<int>(i) * 26),
+                                   static_cast<float>(browserWidth - 16), 23.0f, 3.0f);
+            g.setColour(ink);
+            g.drawText(tracks[i]->name, 16, 151 + static_cast<int>(i) * 26,
+                       browserWidth - 32, 21, juce::Justification::centredLeft, true);
         }
+        g.setColour(juce::Colour(0xff202b36));
+        g.fillRect(browserWidth + 1, 86, trackHeaderWidth - 1, gridBottom - 86);
+        g.setColour(ink);
+        g.setFont(12.0f);
+        g.drawText("Playlist", browserWidth + 9, 94, trackHeaderWidth - 16, 22, juce::Justification::centredLeft);
+        g.setColour(juce::Colour(0xff263441));
+        g.fillRect(left, 122, gridWidth, gridBottom - 122);
+        for (int bar = 0; bar < 8; ++bar)
+        {
+            const int x = left + bar * gridWidth / 8;
+            g.setColour(bar % 2 == 0 ? juce::Colour(0xff273746) : juce::Colour(0xff243340));
+            g.fillRect(x, 148, gridWidth / 8 + 1, gridBottom - 148);
+            g.setColour(juce::Colour(0xff4e6373));
+            g.drawVerticalLine(x, 123.0f, static_cast<float>(gridBottom));
+            g.setColour(ink);
+            g.setFont(11.0f);
+            g.drawText(juce::String(bar + 1), x + 5, 125, 32, 18, juce::Justification::centredLeft);
+            g.setColour(juce::Colour(0xff35495a));
+            for (int beat = 1; beat < 4; ++beat)
+                g.drawVerticalLine(x + beat * gridWidth / 32, 148.0f, static_cast<float>(gridBottom));
+        }
+        for (int row = 0; row < 10; ++row)
+        {
+            const int y = 148 + row * 40;
+            if (y >= gridBottom) break;
+            g.setColour(juce::Colour(0xff3c4e5c));
+            g.drawHorizontalLine(y, static_cast<float>(browserWidth), static_cast<float>(right));
+            g.setColour(row == 0 ? juce::Colour(0xffb2df87) : ink);
+            g.setFont(11.0f);
+            const juce::String rowName = row == 0 ? juce::String("Pattern 1") : juce::String("Audio ") + juce::String(row);
+            g.drawText(rowName,
+                       browserWidth + 7, y + 3, trackHeaderWidth - 12, 17,
+                       juce::Justification::centredLeft, true);
+        }
+        for (size_t i = 0; i < tracks.size(); ++i)
+        {
+            const int y = 188 + static_cast<int>(i) * 40;
+            if (y >= gridBottom) break;
+            const float clipWidth = static_cast<float>(juce::jlimit(0.0, timelineDuration(), tracks[i]->transport.getLengthInSeconds()) / timelineDuration() * gridWidth);
+            g.setColour(juce::Colour(0xff4e9ba8));
+            g.fillRoundedRectangle(static_cast<float>(left + 2), static_cast<float>(y + 2),
+                                   juce::jmax(2.0f, clipWidth - 4.0f), 34.0f, 3.0f);
+            g.setColour(juce::Colours::white);
+            g.drawText(tracks[i]->name, left + 8, y + 6,
+                       juce::jmax(8, static_cast<int>(clipWidth) - 12), 18,
+                       juce::Justification::centredLeft, true);
+        }
+        const float playheadX = static_cast<float>(left) + static_cast<float>(songSeconds.load() / timelineDuration()) * gridWidth;
+        g.setColour(juce::Colour(0xfff6a96c));
+        g.drawLine(playheadX, 123.0f, playheadX, static_cast<float>(gridBottom), 1.5f);
+        if (rackVisible)
+        {
+            const int y = getHeight() - 166;
+            g.setColour(juce::Colour(0xff18212a));
+            g.fillRoundedRectangle(static_cast<float>(left), static_cast<float>(y),
+                                   static_cast<float>(gridWidth), 112.0f, 4.0f);
+            g.setColour(juce::Colour(0xff506778));
+            g.drawRoundedRectangle(static_cast<float>(left), static_cast<float>(y),
+                                   static_cast<float>(gridWidth), 112.0f, 4.0f, 1.0f);
+            g.setColour(ink);
+            g.setFont(12.0f);
+            g.drawText("CHANNEL RACK  /  Pattern 1", left + 12, y + 8,
+                       gridWidth - 24, 22, juce::Justification::centredLeft);
+            g.setColour(juce::Colour(0xff263745));
+            g.fillRect(left + 8, y + 49, gridWidth - 16, 35);
+            g.setColour(ink);
+            g.setFont(11.0f);
+            g.drawText("Kick", left + 18, y + 56, 80, 20, juce::Justification::centredLeft);
+            g.setColour(muted);
+            g.drawText("Clique nos passos para programar o bumbo", left + 12, y + 88,
+                       gridWidth - 24, 18, juce::Justification::centredLeft);
+        }
+        g.setColour(juce::Colour(0xff202a35));
+        g.fillRect(0, getHeight() - 32, getWidth(), 32);
     }
 private:
     double timelineDuration() const
@@ -221,7 +306,7 @@ private:
         for (int i = 0; i < 8; ++i)
         {
             if (clips[i]->getToggleState()) newClips |= static_cast<uint8_t>(1u << i);
-            clips[i]->setButtonText(clips[i]->getToggleState() ? "P1" : "+");
+            clips[i]->setButtonText(clips[i]->getToggleState() ? "Pattern 1" : "");
             clips[i]->setColour(juce::TextButton::buttonOnColourId, juce::Colour(0xff79c8d4));
         }
         stepMask.store(newSteps);
@@ -273,6 +358,8 @@ private:
                     if (!reader) { ++failed; continue; }
                     auto track = std::make_unique<Track>();
                     track->name = file.getFileName();
+                    track->mute.setButtonText("M");
+                    track->solo.setButtonText("S");
                     const auto rate = reader->sampleRate;
                     track->reader = std::make_unique<juce::AudioFormatReaderSource>(reader.release(), true);
                     track->transport.setSource(track->reader.get(), 32768, &safe->diskThread, rate);
@@ -307,7 +394,7 @@ private:
     juce::TimeSliceThread diskThread { "Pulse disk reader" };
     std::vector<std::unique_ptr<Track>> tracks;
     juce::MixerAudioSource mixer;
-    juce::TextButton importButton { "Importar MP3 / WAV" }, playButton { "Play" }, stopButton { "Stop" };
+    juce::TextButton importButton { "Importar" }, playButton { "Play" }, stopButton { "Stop" }, rackButton { "Rack" };
     std::array<std::unique_ptr<juce::TextButton>, 16> steps;
     std::array<std::unique_ptr<juce::TextButton>, 8> clips;
     juce::Label status, tempoLabel, positionLabel;
@@ -320,7 +407,7 @@ private:
     double outputSampleRate = 0.0, kickAge = -1.0, kickPhase = 0.0;
     int previousStep = -1;
     uint64_t seenRevision = 0;
-    bool scrubbing = false;
+    bool scrubbing = false, rackVisible = true;
     std::unique_ptr<juce::FileChooser> chooser;
 };
 

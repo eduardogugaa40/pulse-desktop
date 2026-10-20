@@ -40,3 +40,15 @@ não há suíte automatizada de áudio neste marco.
 Persistência do pattern e de clipes com posição e duração; em seguida,
 transporte único e edição de clipes de áudio. Isso permitirá salvar e reabrir
 um arranjo antes de expandir para MIDI, instrumentos e plugins.
+
+## Revisão visual em andamento (20/10/2026)
+
+O FL Studio 2025 instalado foi observado diretamente na mesma tela que o PULSE:
+toolbar de duas faixas compactas, Browser à esquerda, Playlist ocupando o centro
+com oito ou mais trilhas visíveis e Channel Rack sobreposto/alternável. A revisão
+de `Main.cpp` reorganiza os controles existentes nesse sentido: toolbar menor,
+Browser com os arquivos importados, cabeçalhos de trilha, régua e grid de oito
+compassos, clipes compactos, playhead contínuo e Channel Rack que abre/fecha.
+Os mesmos botões de steps, pattern, transporte e importação seguem conectados
+à lógica de áudio anterior. Esta revisão ainda requer compilação e teste visual
+do novo executável; os clipes de áudio ainda não têm waveform nem edição.
