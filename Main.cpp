@@ -8,6 +8,32 @@
 #include <vector>
 #include <memory>
 
+// An empty slot is part of the grid, not a large button. It remains clickable.
+class PatternSlotButton final : public juce::TextButton
+{
+public:
+    void paintButton(juce::Graphics& g, bool highlighted, bool pressed) override
+    {
+        auto area = getLocalBounds().toFloat().reduced(1.0f, 1.0f);
+        if (getToggleState())
+        {
+            g.setColour(juce::Colour(pressed ? 0xff90bdc4 : 0xff77c4cf));
+            g.fillRoundedRectangle(area, 3.0f);
+            g.setColour(juce::Colour(0xffbdebf1));
+            g.fillRect(area.getX(), area.getY(), area.getWidth(), 3.0f);
+            g.setColour(juce::Colour(0xff10242c));
+            g.setFont(11.0f);
+            g.drawFittedText(getButtonText(), getLocalBounds().reduced(8, 2),
+                             juce::Justification::centredLeft, 1);
+        }
+        else if (highlighted)
+        {
+            g.setColour(juce::Colour(0x334f9aa5));
+            g.fillRoundedRectangle(area, 3.0f);
+        }
+    }
+};
+
 // Streaming playback plus a small, independently implemented pattern sequencer.
 class Studio final : public juce::AudioAppComponent, private juce::Timer
 {
@@ -28,7 +54,7 @@ public:
         tempo.setRange(40, 240, 1);
         tempo.setValue(120);
         tempo.setTextBoxStyle(juce::Slider::TextBoxRight, false, 56, 22);
-        tempo.onValueChange = [this] { beatsPerMinute.store(tempo.getValue()); updateTimelineRange(); repaint(); };
+        tempo.onValueChange = [this] { beatsPerMinute.store(tempo.getValue()); updateTimelineRange(); resized(); repaint(); };
         position.setRange(0.0, 16.0, 0.01);
         position.setTextBoxStyle(juce::Slider::TextBoxRight, false, 65, 22);
         position.onDragStart = [this] { scrubbing = true; };
@@ -46,7 +72,7 @@ public:
         }
         for (int i = 0; i < 8; ++i)
         {
-            clips[i] = std::make_unique<juce::TextButton>("+");
+            clips[i] = std::make_unique<PatternSlotButton>();
             clips[i]->setClickingTogglesState(true);
             clips[i]->onClick = [this] { updatePatternMasks(); };
             addAndMakeVisible(*clips[i]);
@@ -67,7 +93,7 @@ public:
             position.setValue(0.0, juce::dontSendNotification);
         };
         updatePatternMasks();
-        setSize(1100, 700);
+        setSize(1000, 640);
         setAudioChannels(0, 2);
         startTimerHz(15);
     }
@@ -138,6 +164,7 @@ public:
         constexpr int browserWidth = 190, trackHeaderWidth = 122;
         const int left = browserWidth + trackHeaderWidth;
         const int playlistWidth = juce::jmax(80, getWidth() - left - 14);
+        const int barWidth = juce::jmax(8, playlistWidth / visibleBars());
         playButton.setBounds(12, 10, 62, 28);
         stopButton.setBounds(78, 10, 62, 28);
         tempoLabel.setBounds(154, 10, 34, 28);
@@ -147,8 +174,8 @@ public:
         rackButton.setBounds(getWidth() - 196, 10, 88, 28);
         importButton.setBounds(getWidth() - 104, 10, 94, 28);
         for (int i = 0; i < 8; ++i)
-            clips[i]->setBounds(left + i * playlistWidth / 8 + 2, 151,
-                                juce::jmax(8, playlistWidth / 8 - 4), 32);
+            clips[i]->setBounds(left + i * barWidth + 1, 151,
+                                juce::jmax(8, barWidth - 2), 32);
         const int rackY = getHeight() - 166;
         for (int i = 0; i < 16; ++i)
         {
@@ -172,6 +199,7 @@ public:
         const int left = browserWidth + trackHeaderWidth;
         const int right = getWidth() - 14;
         const int gridWidth = juce::jmax(80, right - left);
+        const double visibleSeconds = visibleBars() * 4.0 * 60.0 / beatsPerMinute.load();
         const int gridBottom = getHeight() - 32;
         const auto ink = juce::Colour(0xffd9e2e7);
         const auto muted = juce::Colour(0xff8797a2);
@@ -215,11 +243,12 @@ public:
         g.drawText("Playlist", browserWidth + 9, 94, trackHeaderWidth - 16, 22, juce::Justification::centredLeft);
         g.setColour(juce::Colour(0xff263441));
         g.fillRect(left, 122, gridWidth, gridBottom - 122);
-        for (int bar = 0; bar < 8; ++bar)
+        const int barCount = visibleBars();
+        for (int bar = 0; bar < barCount; ++bar)
         {
-            const int x = left + bar * gridWidth / 8;
+            const int x = left + bar * gridWidth / barCount;
             g.setColour(bar % 2 == 0 ? juce::Colour(0xff273746) : juce::Colour(0xff243340));
-            g.fillRect(x, 148, gridWidth / 8 + 1, gridBottom - 148);
+            g.fillRect(x, 148, gridWidth / barCount + 1, gridBottom - 148);
             g.setColour(juce::Colour(0xff4e6373));
             g.drawVerticalLine(x, 123.0f, static_cast<float>(gridBottom));
             g.setColour(ink);
@@ -227,7 +256,7 @@ public:
             g.drawText(juce::String(bar + 1), x + 5, 125, 32, 18, juce::Justification::centredLeft);
             g.setColour(juce::Colour(0xff35495a));
             for (int beat = 1; beat < 4; ++beat)
-                g.drawVerticalLine(x + beat * gridWidth / 32, 148.0f, static_cast<float>(gridBottom));
+                g.drawVerticalLine(x + beat * gridWidth / (barCount * 4), 148.0f, static_cast<float>(gridBottom));
         }
         for (int row = 0; row < 10; ++row)
         {
@@ -246,7 +275,7 @@ public:
         {
             const int y = 188 + static_cast<int>(i) * 40;
             if (y >= gridBottom) break;
-            const float clipWidth = static_cast<float>(juce::jlimit(0.0, timelineDuration(), tracks[i]->transport.getLengthInSeconds()) / timelineDuration() * gridWidth);
+            const float clipWidth = static_cast<float>(juce::jlimit(0.0, visibleSeconds, tracks[i]->transport.getLengthInSeconds()) / visibleSeconds * gridWidth);
             g.setColour(juce::Colour(0xff4e9ba8));
             g.fillRoundedRectangle(static_cast<float>(left + 2), static_cast<float>(y + 2),
                                    juce::jmax(2.0f, clipWidth - 4.0f), 34.0f, 3.0f);
@@ -255,7 +284,7 @@ public:
                        juce::jmax(8, static_cast<int>(clipWidth) - 12), 18,
                        juce::Justification::centredLeft, true);
         }
-        const float playheadX = static_cast<float>(left) + static_cast<float>(songSeconds.load() / timelineDuration()) * gridWidth;
+        const float playheadX = static_cast<float>(left) + static_cast<float>(songSeconds.load() / visibleSeconds) * gridWidth;
         g.setColour(juce::Colour(0xfff6a96c));
         g.drawLine(playheadX, 123.0f, playheadX, static_cast<float>(gridBottom), 1.5f);
         if (rackVisible)
@@ -284,6 +313,11 @@ public:
         g.fillRect(0, getHeight() - 32, getWidth(), 32);
     }
 private:
+    int visibleBars() const
+    {
+        const double secondsPerBar = 4.0 * 60.0 / beatsPerMinute.load();
+        return juce::jlimit(8, 64, static_cast<int>(std::ceil(timelineDuration() / secondsPerBar)));
+    }
     double timelineDuration() const
     {
         double duration = 8.0 * 4.0 * 60.0 / beatsPerMinute.load();
@@ -396,7 +430,7 @@ private:
     juce::MixerAudioSource mixer;
     juce::TextButton importButton { "Importar" }, playButton { "Play" }, stopButton { "Stop" }, rackButton { "Rack" };
     std::array<std::unique_ptr<juce::TextButton>, 16> steps;
-    std::array<std::unique_ptr<juce::TextButton>, 8> clips;
+    std::array<std::unique_ptr<PatternSlotButton>, 8> clips;
     juce::Label status, tempoLabel, positionLabel;
     juce::Slider tempo, position;
     std::atomic<double> beatsPerMinute { 120.0 }, songSeconds { 0.0 };
