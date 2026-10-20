@@ -1,11 +1,12 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 #pragma once
 #include <cstdint>
+#include <cmath>
 
 namespace pulse
 {
 constexpr int stepsPerBar = 16;
-constexpr int playlistBars = 8;
+constexpr int playlistBars = 32;
 
 inline int stepAtTime(double seconds, double bpm)
 {
@@ -15,6 +16,17 @@ inline int stepAtTime(double seconds, double bpm)
 inline int barAtStep(int globalStep)
 {
     return (globalStep / stepsPerBar) % playlistBars;
+}
+
+inline int patternAtStep(const uint8_t* arrangement, int globalStep)
+{
+    return arrangement[barAtStep(globalStep)];
+}
+
+inline double noteFrequency(int midiNote)
+{
+    // A4 = MIDI 69. Kept outside the GUI/audio device code for deterministic tests.
+    return 440.0 * std::pow(2.0, (midiNote - 69) / 12.0);
 }
 
 inline int stepInBar(int globalStep)
