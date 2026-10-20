@@ -3,22 +3,28 @@
 Base experimental de uma DAW open source para Windows, Linux e macOS.
 Implementação independente: não contém código, plugins ou recursos do FL Studio.
 
-**Estado: código inicial, ainda não compilado nem testado em execução.**
-Não há instalador ou release. O protótipo web não faz parte deste projeto.
+**Estado: aplicativo inicial, ainda sem edição de clipes ou projetos.**
+O código original compilou em Windows, Linux e macOS no GitHub Actions. A janela
+foi aberta no Windows; importação e áudio audível ainda precisam de validação
+manual. As melhorias mais recentes também precisam passar pelo CI. Não há
+instalador ou release. O protótipo web não faz parte deste projeto.
 
 ## Implementado no código
 Janela nativa JUCE; seleção de arquivos MP3/WAV; até oito pistas reproduzidas
 simultaneamente a partir do início; leitura antecipada em disco; conversão de
-taxa de amostragem; play/stop; nomes e barras de duração das fontes.
+taxa de amostragem; play/pause/stop; busca de posição comum; volume, mute e
+solo por pista; BPM e marcações de compasso 4/4; nomes e barras de duração.
+O BPM controla apenas a régua visual: o áudio importado não é esticado nem
+sincronizado automaticamente ao andamento.
 As barras ainda não representam formas de onda. Há atenuação fixa para a soma
-de oito pistas; ainda não há controles de mixagem. Início das pistas ainda usa
+de pistas antes do ganho individual. Início das pistas ainda usa
 transportes individuais e precisa de transporte comum para precisão de amostra.
 
 ## Próximos marcos
-1. Compilar e validar importação e áudio real nos três sistemas.
+1. Validar importação, busca e áudio audível nos três sistemas.
 2. Modelo de projeto, transporte comum, clipes, desfazer/refazer e salvamento.
-3. Biblioteca lateral, ondas em cache, mover/aparar/dividir clipes e mixer.
-4. BPM, grade musical, metrônomo, loop e exportação WAV.
+3. Biblioteca lateral, ondas em cache e mover/aparar/dividir clipes.
+4. Metrônomo, loop, ajuste de áudio ao BPM e exportação WAV.
 5. Efeitos internos; depois hospedagem de plugins, automação e latência.
 
 ## Compilação
