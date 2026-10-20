@@ -4,9 +4,10 @@ Base experimental de uma DAW open source para Windows, Linux e macOS.
 Implementação independente: não contém código, plugins ou recursos do FL Studio.
 
 **Estado: aplicativo inicial, ainda sem edição de clipes ou projetos.**
-O código original compilou em Windows, Linux e macOS no GitHub Actions. A janela
-foi aberta no Windows; importação e áudio audível ainda precisam de validação
-manual. As melhorias mais recentes também precisam passar pelo CI. Não há
+O código atualizado compilou em Windows, Linux e macOS no GitHub Actions
+([execução 39358527688](https://github.com/eduardogugaa40/pulse-desktop/actions/runs/39358527688)).
+A janela de uma versão anterior foi aberta no Windows; importação e áudio audível
+ainda precisam de validação manual desta versão. Não há
 instalador ou release. O protótipo web não faz parte deste projeto.
 
 ## Implementado no código
@@ -38,8 +39,8 @@ cmake --build build --config Release --parallel 2
 
 No Ubuntu, instale também as dependências listadas no workflow de CI.
 O aplicativo é gerado em `build/Pulse_artefacts/Release/`.
-O workflow de GitHub Actions prepara builds nos três sistemas; nenhum resultado
-de CI foi obtido ainda. Builds automatizados não substituem testes de áudio real.
+O workflow de GitHub Actions compilou esta versão nos três sistemas.
+Builds automatizados não substituem testes de áudio real.
 
 ## Licença e distribuição
 AGPL-3.0-only para o código original; JUCE sob sua opção AGPLv3.
