@@ -68,8 +68,9 @@ public:
     {
         for (auto& pattern : patternMasks)
             for (auto& mask : pattern) mask.store(0);
-        for (auto& pattern : noteMasks)
-            for (auto& mask : pattern) mask.store(0);
+        for (auto& pattern : noteLengths)
+            for (auto& pitch : pattern)
+                for (auto& length : pitch) length.store(0);
         for (auto& clip : clipPatterns) clip.store(0);
         for (auto& gain : gains) gain.store(1.0f);
         for (auto& pan : pans) pan.store(0.0f);
@@ -259,12 +260,13 @@ public:
                             voice.age = 0.0;
                         }
                     for (int note = 0; note < pianoNotes; ++note)
-                        if (pulse::stepEnabled(noteMasks[pattern - 1][note].load(), step))
+                        if (const auto length = noteLengths[pattern - 1][note][step].load())
                         {
                             auto& voice = pianoVoices[nextPianoVoice++ % pianoVoices.size()];
                             voice.age = 0.0;
                             voice.phase = 0.0;
                             voice.midiNote = 60 + note;
+                            voice.duration = length * 15.0 / bpm;
                         }
                 }
             }
@@ -319,13 +321,12 @@ public:
             for (auto& voice : pianoVoices)
             {
                 if (voice.age < 0.0) continue;
-                const double duration = 15.0 / bpm;
                 const double release = 0.06;
-                if (voice.age >= duration + release) { voice.age = -1.0; continue; }
+                if (voice.age >= voice.duration + release) { voice.age = -1.0; continue; }
                 const double frequency = pulse::noteFrequency(voice.midiNote);
                 voice.phase += juce::MathConstants<double>::twoPi * frequency / outputSampleRate;
                 const float envelope = static_cast<float>(juce::jmin(1.0, voice.age * 100.0)
-                    * juce::jlimit(0.0, 1.0, (duration + release - voice.age) / release));
+                    * juce::jlimit(0.0, 1.0, (voice.duration + release - voice.age) / release));
                 const float sound = 0.14f * envelope * static_cast<float>(std::sin(voice.phase)
                     + 0.2 * std::sin(2.0 * voice.phase));
                 drumLeft += sound;
@@ -517,7 +518,7 @@ public:
             }
             g.setColour(muted);
             g.setFont(10.0f);
-            g.drawText(pianoVisible ? "Clique ou arraste para desenhar notas; cada nota dura um passo (semicolcheia)."
+            g.drawText(pianoVisible ? "Pulse Synth: clique para criar, arraste para mover; arraste a borda para alongar; direito apaga."
                                     : "Canal/Load: WAV ou MP3; arraste clips para mover, Shift+arraste para duplicar; direito remove.",
                        left + 12, y + 233, gridWidth - 24, 17, juce::Justification::centredLeft);
         }
@@ -526,12 +527,13 @@ public:
     }
     void mouseDown(const juce::MouseEvent& event) override
     {
-        editPiano(event, false);
+        beginPianoEdit(event);
     }
     void mouseDrag(const juce::MouseEvent& event) override
     {
-        editPiano(event, true);
+        dragPianoEdit(event);
     }
+    void mouseUp(const juce::MouseEvent&) override { pianoEditMode = PianoEditMode::none; }
 private:
     static constexpr int maxChannels = 6, maxPatterns = 4, stepsPerBar = 16;
     static constexpr int visiblePlaylistBars = 8, pianoNotes = 12;
@@ -560,41 +562,97 @@ private:
             g.setFont(10.0f);
             g.drawText(juce::String(juce::MidiMessage::getMidiNoteName(60 + pitch, true, true, 4)),
                        left + 14, y, 48, 15, juce::Justification::centredLeft);
-            const auto mask = noteMasks[selectedPattern - 1][pitch].load();
             for (int step = 0; step < stepsPerBar; ++step)
             {
                 const int x0 = noteLeft + step * noteWidth / stepsPerBar;
                 const int x1 = noteLeft + (step + 1) * noteWidth / stepsPerBar;
                 g.setColour((step % 4 == 0) ? juce::Colour(0xff344453) : juce::Colour(0xff293846));
                 g.fillRect(x0, y, x1 - x0 - 1, 15);
-                if (pulse::stepEnabled(mask, step))
+            }
+            for (int step = 0; step < stepsPerBar; ++step)
+            {
+                const int length = noteLengths[selectedPattern - 1][pitch][step].load();
+                if (length > 0)
                 {
+                    const int x0 = noteLeft + step * noteWidth / stepsPerBar;
+                    const int x1 = noteLeft + (step + length) * noteWidth / stepsPerBar;
                     g.setColour(juce::Colour(0xffb2df87));
                     g.fillRoundedRectangle(static_cast<float>(x0 + 1), static_cast<float>(y + 1),
-                                           static_cast<float>(x1 - x0 - 3), 13.0f, 2.0f);
+                                           static_cast<float>(juce::jmax(3, x1 - x0 - 3)), 13.0f, 2.0f);
+                    g.setColour(juce::Colour(0xff607e54));
+                    g.fillRect(x1 - 5, y + 3, 2, 9);
                 }
             }
         }
     }
-    void editPiano(const juce::MouseEvent& event, bool dragging)
+    bool pianoCell(const juce::MouseEvent& event, int& step, int& pitch) const
     {
-        if (!rackVisible || !pianoVisible) return;
+        if (!rackVisible || !pianoVisible) return false;
         const int top = getHeight() - 294;
         const int x = static_cast<int>(event.position.x);
         const int y = static_cast<int>(event.position.y);
         const int noteLeft = playlistLeft() + 68;
         const int noteWidth = getWidth() - playlistLeft() - 14 - 80;
-        if (x < noteLeft || x >= noteLeft + noteWidth || y < top + 36 || y >= top + 228) return;
-        const int step = (x - noteLeft) * stepsPerBar / noteWidth;
-        const int pitch = pianoNotes - 1 - (y - top - 36) / 16;
-        if (step < 0 || step >= stepsPerBar || pitch < 0 || pitch >= pianoNotes) return;
-        const uint16_t bit = static_cast<uint16_t>(1u << step);
-        auto& mask = noteMasks[selectedPattern - 1][pitch];
-        const auto old = mask.load();
-        const auto next = event.mods.isRightButtonDown() ? static_cast<uint16_t>(old & ~bit)
-                          : dragging ? static_cast<uint16_t>(old | bit)
-                                     : static_cast<uint16_t>(old ^ bit);
-        if (next != old) { mask.store(next); repaint(); }
+        if (x < noteLeft || x >= noteLeft + noteWidth || y < top + 36 || y >= top + 228) return false;
+        step = (x - noteLeft) * stepsPerBar / noteWidth;
+        pitch = pianoNotes - 1 - (y - top - 36) / 16;
+        return step >= 0 && step < stepsPerBar && pitch >= 0 && pitch < pianoNotes;
+    }
+    int noteStartAt(int pitch, int step) const
+    {
+        for (int start = step; start >= 0; --start)
+            if (start + noteLengths[selectedPattern - 1][pitch][start].load() > step) return start;
+        return -1;
+    }
+    void beginPianoEdit(const juce::MouseEvent& event)
+    {
+        int step, pitch;
+        if (!pianoCell(event, step, pitch)) return;
+        const int start = noteStartAt(pitch, step);
+        if (event.mods.isRightButtonDown())
+        {
+            if (start >= 0) { noteLengths[selectedPattern - 1][pitch][start].store(0); repaint(); }
+            return;
+        }
+        editPitch = pitch;
+        editStart = start >= 0 ? start : step;
+        editLength = start >= 0 ? noteLengths[selectedPattern - 1][pitch][start].load() : 1;
+        if (start < 0)
+        {
+            noteLengths[selectedPattern - 1][pitch][step].store(1);
+            pianoEditMode = PianoEditMode::draw;
+        }
+        else
+        {
+            const int noteLeft = playlistLeft() + 68;
+            const int noteWidth = getWidth() - playlistLeft() - 94;
+            const int rightEdge = noteLeft + (start + editLength) * noteWidth / stepsPerBar;
+            pianoEditMode = event.position.x >= rightEdge - 8 ? PianoEditMode::resize : PianoEditMode::move;
+        }
+        dragOriginStep = step;
+        repaint();
+    }
+    void dragPianoEdit(const juce::MouseEvent& event)
+    {
+        if (pianoEditMode == PianoEditMode::none) return;
+        int step, pitch;
+        if (!pianoCell(event, step, pitch)) return;
+        if (pianoEditMode == PianoEditMode::draw || pianoEditMode == PianoEditMode::resize)
+        {
+            const int length = juce::jlimit(1, stepsPerBar - editStart, step - editStart + 1);
+            noteLengths[selectedPattern - 1][editPitch][editStart].store(static_cast<uint8_t>(length));
+        }
+        else
+        {
+            const int destination = juce::jlimit(0, stepsPerBar - editLength, editStart + step - dragOriginStep);
+            if (pitch == editPitch && destination == editStart) return;
+            noteLengths[selectedPattern - 1][editPitch][editStart].store(0);
+            noteLengths[selectedPattern - 1][pitch][destination].store(static_cast<uint8_t>(editLength));
+            editPitch = pitch;
+            editStart = destination;
+            dragOriginStep = step;
+        }
+        repaint();
     }
     struct SampleData
     {
@@ -608,7 +666,7 @@ private:
     };
     struct PianoVoice
     {
-        double age = -1.0, phase = 0.0;
+        double age = -1.0, phase = 0.0, duration = 0.0;
         int midiNote = 60;
     };
     void addChannel()
@@ -692,7 +750,8 @@ private:
         for (int channel = 0; channel < maxChannels; ++channel)
             patternMasks[destination][channel].store(clone ? patternMasks[source][channel].load() : 0);
         for (int note = 0; note < pianoNotes; ++note)
-            noteMasks[destination][note].store(clone ? noteMasks[source][note].load() : 0);
+            for (int step = 0; step < stepsPerBar; ++step)
+                noteLengths[destination][note][step].store(clone ? noteLengths[source][note][step].load() : 0);
         patternSelector.addItem("Pattern " + juce::String(patternCount), patternCount);
         patternSelector.setSelectedId(patternCount);
         if (patternCount == maxPatterns)
@@ -850,7 +909,7 @@ private:
     std::atomic<double> beatsPerMinute { 120.0 }, songSeconds { 0.0 };
     std::atomic<uint64_t> seekRevision { 0 };
     std::array<std::array<std::atomic<uint16_t>, maxChannels>, maxPatterns> patternMasks {};
-    std::array<std::array<std::atomic<uint16_t>, pianoNotes>, maxPatterns> noteMasks {};
+    std::array<std::array<std::array<std::atomic<uint8_t>, stepsPerBar>, pianoNotes>, maxPatterns> noteLengths {};
     std::array<std::atomic<uint8_t>, pulse::playlistBars> clipPatterns {};
     std::array<std::atomic<float>, maxChannels> gains {};
     std::array<std::atomic<float>, maxChannels> pans {};
@@ -867,6 +926,9 @@ private:
     uint64_t seenRevision = 0;
     int selectedPattern = 1, patternCount = 1, firstVisibleBar = 0;
     std::atomic<int> arrangementEndBars { visiblePlaylistBars };
+    enum class PianoEditMode { none, draw, move, resize };
+    PianoEditMode pianoEditMode = PianoEditMode::none;
+    int editPitch = 0, editStart = 0, editLength = 1, dragOriginStep = 0;
     bool scrubbing = false, rackVisible = true, pianoVisible = false;
     std::unique_ptr<juce::FileChooser> chooser;
     std::unique_ptr<juce::FileChooser> sampleChooser;
